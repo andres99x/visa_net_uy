@@ -1,231 +1,76 @@
-require "rexml/document"
-require 'openssl'
-require "base64"
-
 class VisaNetUy::PlugIn
-  include REXML
 
-  BLOCK_SIZE = 8
+  attr_accessor :cipher_public_key, :cipher_private_key, :signature_public_key, :signature_private_key, :iv
 
-  def generate_xml(fields = {})
-    fields_temp = {}
-    taxes_name = {}
-    taxes_amount = {}
-
-    dom = Document.new
-    dom << XMLDecl.new('1.0', 'iso-8859-1')
-
-    root = Element.new('VPOSTransaction1.2')
-    dom << root
-
-    fields.each_pair do |field, value|
-
-      if VisaNet::VALID_FIELDS.include? field
-        fields_temp[field] = value
-      elsif !field.scan(/tax_\d{1,2}_name/).empty?
-        taxes_name[field.gsub(/(^tax_)|(_name$)/,'')] = value
-      elsif !field.scan(/tax_\d{1,2}_amount/).empty?
-        taxes_amount[field.gsub(/(^tax_)|(_amount$)/,'')] = value
-      else
-        raise "#{field} is not a valid field."
+  def initialize(options = {})
+    unless block_given?
+      options.each do |key, value|
+        send(:"#{key}=", value)
       end
-
+    else
+      yield(self)
     end
-
-    fields_temp.each_pair do |field, value|
-      element = Element.new field
-      element.text = value
-
-      root << element
-    end
-
-
-    unless taxes_name.empty?
-      taxes_root = Element.new('taxes')
-      root << taxes_root
-
-      taxes_name.each_pair do |tax, value|
-        element = Element.new('Tax')
-        element.add_attribute 'name', value
-        element.add_attribute 'amount', taxes_amount[tax]
-
-        taxes_root << element
-      end
-    end
-
-    dom.to_s
   end
 
-  def parse_xml(xml = nil)
-    fieds = {}
+  def vpos_request_params(fields)
+    request_params = {}
 
-    dom = Document.new(xml)
-    root = dom.root
-
-    return fields unless root.attribute('name') == 'VPOSTransaction1.2'
-
-    root.elements.each do |child|
-
-      if child.attributes('name') == 'taxes'
-        tax_count = 1
-
-        child.elements.each do |tax|
-          fields["tax_#{tax_count}_name"] = tax.attributes('name')
-          fields["tax_#{tax_count}_amount"] = tax.attributes('amount')
-
-          tax_count += 1
-        end
-      else
-        fields[child.attributes('name')] = child.get_text
-      end
-
-    end
-
-    return fields
-
-  end
-
-  def vpos_send(fields, cipher_public_key, signature_private_key, vi)
+    # Check for required fields
+    fields.include?('acquirerId') ? (request_params['IDACQUIRER'] = fields['acquirerId']) : (raise "Misssing acquirerId field.")
+    fields.include?('commerceId') ? (request_params['IDCOMMERCE'] = fields['commerceId']) : (raise "Misssing commerceId field.")
 
     # Generate XML from fields
-    xml = generate_xml(fields)
-
-    # Generate digital signature
-    urlsafe_base64_signature = generate_urlsafe_base64_signature(xml, signature_private_key)
+    xml = xmler.generate(fields)
 
     # Generate SessionKey
-    session_key = generate_session_key
+    session_key = cipher.generate_session_key
+
+    # Generate digital signature
+    urlsafe_base64_signature = signer.generate_urlsafe_base64_signature(xml, signature_private_key)
+    request_params['DIGITALSIGN'] = urlsafe_base64_signature
 
     # Cipher XML
-    urlsafe_base64_encrypted_xml = urlsafe_base64_symmetric_encrypt(xml, session_key, vi)
+    urlsafe_base64_encrypted_xml = cipher.urlsafe_base64_symmetric_encrypt(xml, session_key, iv)
+    request_params['XMLREQ'] = urlsafe_base64_encrypted_xml
 
     # Cipher SessionKey
-    urlsafe_base64_encrypted_session_key = urlsafe_base64_encrypt(session_key, cipher_public_key)
+    urlsafe_base64_encrypted_session_key = cipher.urlsafe_base64_asymmetric_encrypt(session_key, cipher_public_key)
+    request_params['SESSIONKEY'] = urlsafe_base64_encrypted_session_key
 
-    return { 'SESSIONKEY' => urlsafe_base64_encrypted_session_key,
-             'XMLREQ' => urlsafe_base64_encrypted_xml,
-             'DIGITALSIGN' => urlsafe_base64_signature}
+    request_params
   end
 
-  def vpos_response (fields, signature_public_key, cipher_private_key, vi)
+  def vpos_response_fields(response)
+    # Check for required fields
+    response.include?('SESSIONKEY') ? (session_key = response['SESSIONKEY']) : (raise "Misssing SESSIONKEY.")
+    response.include?('XMLRES') ? (xmlres = response['XMLRES']) : (raise "Misssing XMLRES.")
+    response.include?('DIGITALSIGN') ? (digital_sing = response['DIGITALSIGN']) : (raise "Misssing DIGITALSIGN.")
 
-    raise 'Missing fields.' unless fields.include?('SESSIONKEY') && fields.include?('XMLRES') && fields.include?('DIGITALSIGN')
+    # Decrypt Session Key
+    session_key = cipher.urlsafe_base64_asymmetric_decrypt(session_key, cipher_private_key)
 
-    session_key = urlsafe_base64_decrypt(fields['SESSIONKEY'], cipher_private_key)
+    # Decrypt XML
+    xml = cipher.urlsafe_base64_symmetric_decrypt(xmlres, session_key, iv)
 
-    xml = urlsafe_base64_symmetric_decrypt(fields['XMLRES'], session_key, vi)
+    # Verify Signature
+    raise 'Invalid Signature.' unless signer.verify_urlsafe_base64_signature(xml, digital_sing, signature_public_key)
 
-    return false unless verify_urlsafe_base64_signature(xml, fields['DIGITALSIGN'], signature_public_key)
-
-    parse_xml(xml)
-
+    # Parse XML
+    xmler.parse(xml)
   end
 
-  def generate_urlsafe_base64_signature(data, private_key)
+  protected
 
-    openssl_rsa = OpenSSL::PKey::RSA.new(private_key, nil)
-
-    raise 'Invalid private key.' unless openssl_rsa.private?
-
-    digest = OpenSSL::Digest::SHA1.new
-    signature = openssl_rsa.sign(digest, data)
-
-    raise 'RSA signing unsuccessful.' unless signature
-
-    Base64.urlsafe_encode64(encrypted_data)
-
+  def xmler
+    @xmler ||= VisaNetUy::Xmler.new
   end
 
-  def verify_urlsafe_base64_signature(data, signature, public_key)
-
-    openssl_rsa = OpenSSL::PKey::RSA.new(public_key, nil)
-
-    raise 'Invalid public key.' unless openssl_rsa.public?
-
-    digest = OpenSSL::Digest::SHA1.new
-
-    openssl_rsa.public_key.verify(digest, Base64.urlsafe_decode64(signature), data)
-
+  def cipher
+    @cipher ||= VisaNetUy::Cipher.new
   end
 
-  def generate_session_key
-
-    cipher = OpenSSL::Cipher::AES.new(128, :CBC)
-    cipher.encrypt
-    cipher.random_iv
-
-  end
-
-  def urlsafe_base64_encrypt(data, public_key)
-
-    openssl_rsa = OpenSSL::PKey::RSA.new(public_key, nil)
-
-    raise 'Invalid public key.' unless openssl_rsa.public?
-
-    encrypted_data = openssl_rsa.public_encrypt(data)
-
-    Base64.urlsafe_encode64(encrypted_data)
-
-  end
-
-  def urlsafe_base64_decrypt(encrypted_data, private_key)
-
-    openssl_rsa = OpenSSL::PKey::RSA.new(private_key, nil)
-
-    raise 'Invalid private key.' unless openssl_rsa.private?
-
-    data = openssl_rsa.private_decrypt(Base64.urlsafe_decode64(encrypted_data))
-
-  end
-
-  def urlsafe_base64_symmetric_encrypt(data, key, vector)
-
-    raise 'Vector must have 16 hexadecimal characters.' unless vector.length == 16
-    raise 'Key must have 16 hexadecimal characters.' unless key.length == 16
-
-    bin_vector = [vector].pack('H*')
-    raise 'Initialization Vector is not valid, must contain only hexadecimal characters.' if bin_vector.blank?
-
-    key += key.byteslice(0,8)
-
-    len = data.length
-    padding = BLOCK_SIZE - (len % BLOCK_SIZE)
-    data += padding.chr * padding
-
-    cipher = OpenSSL::Cipher::Cipher.new("des-ede3-cbc")
-    cipher.encrypt
-    cipher.vi = bin_vector
-    cipher.key = key
-    cipher.padding = 0
-
-    encrypted_data = cipher.update(data) + cipher.final
-
-    Base64.urlsafe_encode64(encrypted_data)
-
-  end
-
-  def urlsafe_base64_symmetric_decrypt(encrypted_data, key, vector)
-
-    raise 'Vector must have 16 hexadecimal characters.' unless vector.length == 16
-    raise 'Key must have 16 hexadecimal characters.' unless key.length == 16
-
-    bin_vector = [vector].pack('H*')
-    raise 'Initialization Vector is not valid, must contain only hexadecimal characters.' if bin_vector.blank?
-
-    key += key.byteslice(0,8)
-
-    cipher = OpenSSL::Cipher::Cipher.new("des-ede3-cbc")
-    cipher.decrypt
-    cipher.vi = bin_vector
-    cipher.key = key
-    cipher.padding = 0
-
-    decrypted_data = cipher.update(Base64.urlsafe_decode64(encrypted_data)) + cipher.final
-
-    packing = BLOCK_SIZE > decrypted_data.last.ord ? decrypted_data.last.ord : 0
-
-    decrypted_data.slice(0, decrypted_data.length - packing)
-
+  def signer
+    @signer ||= VisaNetUy::Signer.new
   end
 
 end
