@@ -19,7 +19,6 @@ class VisaNetUy::Xmler
     dom << root
 
     fields.each_pair do |field, value|
-      p field
       if VisaNetUy::VALID_FIELDS.include? field
         fields_temp[field] = value
       elsif !field.scan(/tax_\d{1,2}_name/).empty?
@@ -87,7 +86,6 @@ class VisaNetUy::Xmler
   end
 
 end
-
 
 # Monkey Patching
 module REXML

@@ -11,6 +11,7 @@ module VisaNetUy
     'acquirerId',
     'commerceId',
     'purchaseCurrencyCode',
+    'purchaseIPAddress',
     'purchaseAmount',
     'purchaseOperationNumber',
     'billingAddress',
