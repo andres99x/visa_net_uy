@@ -1,5 +1,3 @@
-require 'net/http'
-
 class VisaNetUy::PlugIn
 
   attr_accessor :cipher_public_key, :cipher_private_key, :signature_public_key, :signature_private_key, :iv
