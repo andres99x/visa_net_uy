@@ -38,7 +38,7 @@ Generate POST request parameters
       'purchaseCurrencyCode' => '858',
       'terminalCode' => 'VBV00111'})
 
-Get response fields from VisaNet response
+Get response fields from VisaNet callback
 
     plugin.vpos_response_fields(response)
 
