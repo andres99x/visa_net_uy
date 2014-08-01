@@ -62,7 +62,7 @@ class VisaNetUy::Xmler
     return fields unless root.name == ROOT_NAME
 
     root.elements.each do |child|
-      fields[child.name] = child.get_text
+      fields[child.name] = child.get_text.value
     end
 
     fields
